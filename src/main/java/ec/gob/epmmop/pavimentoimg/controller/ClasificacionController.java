@@ -21,37 +21,118 @@ public class ClasificacionController {
             @RequestPart("file") MultipartFile file,
             @RequestPart(value = "filename", required = false) String filename
     ) {
-
         String nombre = (filename != null && !filename.isBlank())
                 ? filename
                 : file.getOriginalFilename();
 
-        PythonClasificacionResponse py = null;
-
-        // ✅ Si Python está caído, NO debe botar 500
+        PythonClasificacionResponse py;
         try {
-            py = iaService.clasificar(file);
-        } catch (Exception ignored) {
-            // Puedes loguear aquí si quieres
-        }
-
-        // ✅ Si no hay respuesta de Python:
-        if (py == null || py.getEstado() == null || py.getEstado().isBlank()) {
+            py = iaService.clasificar(file); // <-- 1 parámetro, OK
+        } catch (Exception e) {
             return new ClasificacionResponse(
                     nombre,
                     "SIN_SERVICIO_IA",
-                    "Clasificación manual / reintentar más tarde"
+                    "Clasificación manual / reintentar más tarde",
+                    null,
+                    null,
+                    null,
+                    null,   // porcentajePavimentoPct
+                    null,   // intervenida
+                    null,   // snAporta
+                    e.getMessage()
             );
         }
 
-        String estado = py.getEstado().toUpperCase();
+        if (py == null) {
+            return new ClasificacionResponse(
+                    nombre,
+                    "SIN_IA",
+                    "Respuesta IA vacía",
+                    null,
+                    null,
+                    null,
+                    null,   // porcentajePavimentoPct
+                    null,   // intervenida
+                    null,   // snAporta
+                    "Python devolvió null"
+            );
+        }
 
-        String recomendacion;
-        if ("BUENO".equals(estado)) recomendacion = "Mantenimiento rutinario";
-        else if ("REGULAR".equals(estado)) recomendacion = "Mantenimiento periódico";
-        else if ("MALO".equals(estado)) recomendacion = "Rehabilitación / Reconstrucción";
-        else recomendacion = "Evaluación técnica requerida";
+        // Traer campos Python
+        String dano = py.getDano();
+        Double areaPct = py.getAreaDanoPct();
+        Double confianza = py.getConfianza();
 
-        return new ClasificacionResponse(nombre, estado, recomendacion);
+        // ✅ NUEVO: porcentaje de pavimento en la foto
+        Double porcentajePavimentoPct = py.getPorcentajePavimentoPct();
+
+        Boolean intervenida = py.getIntervenida();
+        Boolean snAporta = py.getSnAporta();
+        String nota = py.getNota();
+
+        // Si viene el % de daño => estado por manual
+        if (areaPct != null) {
+            String estadoCalc = calcularEstadoPorArea(areaPct);
+            String recomendacion = recomendacionPorEstado(estadoCalc);
+
+            return new ClasificacionResponse(
+                    nombre,
+                    estadoCalc,
+                    recomendacion,
+                    dano,
+                    areaPct,
+                    confianza,
+                    porcentajePavimentoPct,
+                    intervenida,
+                    snAporta,
+                    nota
+            );
+        }
+
+        // Si NO viene área => usar estado del modelo Python (si existe)
+        String estado = (py.getEstado() != null) ? py.getEstado().trim().toUpperCase() : "";
+        if (estado.isBlank()) {
+            return new ClasificacionResponse(
+                    nombre,
+                    "SIN_IA",
+                    "Respuesta IA vacía",
+                    dano,
+                    null,
+                    confianza,
+                    porcentajePavimentoPct,
+                    intervenida,
+                    snAporta,
+                    nota
+            );
+        }
+
+        return new ClasificacionResponse(
+                nombre,
+                estado,
+                recomendacionPorEstado(estado),
+                dano,
+                null,
+                confianza,
+                porcentajePavimentoPct,
+                intervenida,
+                snAporta,
+                nota
+        );
+    }
+
+    private static String calcularEstadoPorArea(double areaPct) {
+        // 0-0.5% BUENO
+        // 0.5-3% REGULAR
+        // >3% MALO
+        if (areaPct <= 0.5) return "BUENO";
+        if (areaPct <= 3.0) return "REGULAR";
+        return "MALO";
+    }
+
+    private static String recomendacionPorEstado(String estado) {
+        if ("BUENO".equalsIgnoreCase(estado)) return "Mantenimiento rutinario";
+        if ("REGULAR".equalsIgnoreCase(estado)) return "Mantenimiento periódico";
+        if ("MALO".equalsIgnoreCase(estado)) return "Reconstrucción y Rehabilitación";
+        return "Evaluación técnica requerida";
     }
 }

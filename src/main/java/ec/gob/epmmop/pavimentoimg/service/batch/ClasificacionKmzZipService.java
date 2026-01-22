@@ -11,9 +11,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.*;
-import java.util.Enumeration;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
@@ -36,44 +34,65 @@ public class ClasificacionKmzZipService {
         Files.copy(puntosKmz.getInputStream(), kmzIn, StandardCopyOption.REPLACE_EXISTING);
         Files.copy(imagenesZip.getInputStream(), zipImgs, StandardCopyOption.REPLACE_EXISTING);
 
-        // 1) Extraer KMZ
+        /* =========================================================
+           1) EXTRAER KMZ
+        ========================================================= */
         Path kmzDir = work.resolve("kmz");
         Files.createDirectories(kmzDir);
         unzip(kmzIn, kmzDir);
 
         Path docKml = encontrarPrimerKml(kmzDir);
 
-        // 2) Leer puntos (placemarks)
-        KmlData data = KmlParser.leerPlacemark(docKml);
+        /* =========================================================
+           2) LEER PLACEMARKS DEL KML
+        ========================================================= */
+        KmlData dataOriginal = KmlParser.leerPlacemark(docKml);
 
-        // 3) Extraer ZIP imágenes
+        /* =========================================================
+           3) EXTRAER ZIP DE IMÁGENES
+        ========================================================= */
         Path imgsDir = work.resolve("imgs");
         Files.createDirectories(imgsDir);
         unzip(zipImgs, imgsDir);
 
-        // 4) Index de imágenes por nombre base (sin extensión)
+        /* =========================================================
+           4) INDEXAR IMÁGENES POR NOMBRE BASE
+        ========================================================= */
         Map<String, Path> imagenPorNombreBase = indexarImagenes(imgsDir);
 
-        // 5) Clasificar por cada punto existente en el KMZ
+        /* =========================================================
+           5) FILTRAR SOLO PUNTOS CON IMAGEN
+        ========================================================= */
+        KmlData dataFiltrada = new KmlData();
+
+        for (KmlData.Placemark p : dataOriginal.getPlacemarks()) {
+            String base = normalizarNombre(p.getName());
+            if (imagenPorNombreBase.containsKey(base)) {
+                dataFiltrada.add(p);
+            }
+        }
+
+        /* =========================================================
+           6) CLASIFICAR SOLO LOS PUNTOS FILTRADOS
+        ========================================================= */
         Map<String, String> estadoPorNombre = new HashMap<>();
 
-        for (KmlData.Placemark p : data.getPlacemarks()) {
+        for (KmlData.Placemark p : dataFiltrada.getPlacemarks()) {
 
             String base = normalizarNombre(p.getName());
             Path img = imagenPorNombreBase.get(base);
 
-            if (img == null) {
-                estadoPorNombre.put(base, "SIN_IMAGEN");
-                continue;
-            }
-
             try {
-                // ✅ Llamada al servicio IA (Python) desde el service central
                 PythonClasificacionResponse py = iaService.clasificarArchivo(img);
 
-                String estado = (py != null && py.getEstado() != null)
-                        ? py.getEstado().toUpperCase()
-                        : "SIN_IA";
+                String estado = "SIN_IA";
+                if (py != null) {
+                    if (py.getAreaDanoPct() != null) {
+                        estado = calcularEstadoPorArea(py.getAreaDanoPct());
+                    } else if (py.getEstado() != null && !py.getEstado().isBlank()) {
+                        estado = py.getEstado().trim().toUpperCase();
+                    }
+                }
 
                 estadoPorNombre.put(base, estado);
 
@@ -82,25 +101,35 @@ public class ClasificacionKmzZipService {
             }
         }
 
-        // 6) Escribir KML nuevo con estilos
+        /* =========================================================
+           7) ESCRIBIR KML FINAL (SOLO CON PUNTOS CON IMAGEN)
+        ========================================================= */
         Path outKml = work.resolve("doc.kml");
-        KmlWriter.escribir(outKml, data, estadoPorNombre);
+        KmlWriter.escribir(outKml, dataFiltrada, estadoPorNombre);
 
-        // 7) Empacar KMZ final
+        /* =========================================================
+           8) EMPAQUETAR KMZ FINAL
+        ========================================================= */
         Path outKmz = work.resolve("resultado_pavimento.kmz");
         zipSoloDocKml(outKml, outKmz);
 
         return outKmz;
     }
 
-    // ----------------- helpers -----------------
+    /* =========================================================
+       UTILIDADES
+    ========================================================= */
+
+    private static String calcularEstadoPorArea(double areaPct) {
+        if (areaPct <= 0.5) return "BUENO";
+        if (areaPct <= 3.0) return "REGULAR";
+        return "MALO";
+    }
 
     private static Path encontrarPrimerKml(Path dir) throws IOException {
-        // normal doc.kml
         Path doc = dir.resolve("doc.kml");
         if (Files.exists(doc)) return doc;
 
-        // si no, buscar el primer .kml
         try (var stream = Files.walk(dir)) {
             return stream
                     .filter(p -> p.toString().toLowerCase().endsWith(".kml"))
@@ -111,6 +140,7 @@ public class ClasificacionKmzZipService {
 
     private static Map<String, Path> indexarImagenes(Path imgsDir) throws IOException {
         Map<String, Path> map = new HashMap<>();
+
         try (var stream = Files.walk(imgsDir)) {
             stream.filter(p -> {
                         String s = p.toString().toLowerCase();
@@ -118,7 +148,6 @@ public class ClasificacionKmzZipService {
                     })
                     .forEach(p -> {
                         String base = normalizarNombre(p.getFileName().toString());
-                        // si hay repetidos, se queda con el primero
                         map.putIfAbsent(base, p);
                     });
         }
@@ -138,9 +167,9 @@ public class ClasificacionKmzZipService {
 
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
-
                 Path outPath = destDir.resolve(entry.getName()).normalize();
-                if (!outPath.startsWith(destDir)) continue; // seguridad
+
+                if (!outPath.startsWith(destDir)) continue;
 
                 if (entry.isDirectory()) {
                     Files.createDirectories(outPath);
@@ -156,7 +185,6 @@ public class ClasificacionKmzZipService {
             }
         }
     }
-
 
     private static void zipSoloDocKml(Path docKml, Path outKmz) throws IOException {
         try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(outKmz))) {

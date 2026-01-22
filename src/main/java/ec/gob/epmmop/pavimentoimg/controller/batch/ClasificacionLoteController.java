@@ -22,13 +22,14 @@ public class ClasificacionLoteController {
 
     @PostMapping(value = "/clasificar-kmz-zip", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<Resource> clasificarKmzZip(
-            @RequestPart("puntosKmz") MultipartFile puntosKmz,
-            @RequestPart("imagenesZip") MultipartFile imagenesZip
+            @RequestPart("kmz") MultipartFile kmz,
+            @RequestPart("zip_imagenes") MultipartFile zipImagenes
     ) throws Exception {
 
-        Path outKmz = service.procesar(puntosKmz, imagenesZip);
+        Path outKmz = service.procesar(kmz, zipImagenes);
 
         Resource resource = new FileSystemResource(outKmz.toFile());
+
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=resultado_pavimento.kmz")
                 .contentType(MediaType.parseMediaType("application/vnd.google-earth.kmz"))
